@@ -1,5 +1,5 @@
 <h1 align="center">
-  llmcord
+The cooler LLMcord
 </h1>
 
 <h3 align="center"><i>

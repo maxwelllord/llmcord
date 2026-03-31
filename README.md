@@ -14,7 +14,7 @@ A discord bot with a simple but effective memory system.
 
 **Automatic memory retrieval** injects stored memories into the chat when they're semantically relevant.
 
-**Sliding chat context:** set a token budget and the context window automatically adjusts.
+**Sliding chat context** set a token budget and the context window automatically adjusts.
 
 ## How the Memory System Works
 
@@ -33,6 +33,7 @@ The bot tracks **sessions** based on a configurable inactivity gap (default 2 ho
 2. It sends them to the LLM along with all existing memories.
 3. The LLM decides what to **add**, **update**, or **delete** — keeping the memory store lean and accurate.
 4. Core memory is rewritten to stay under 15 lines, and stale semantic memories are pruned.
+5. Deleted memories are flagged as deleted in memory.json. You can restore these memories by
 
 You can also trigger a sweep manually at any time with the `/sweep` command.
 
@@ -45,9 +46,15 @@ When you send a message, the bot embeds your message and compares it against sto
 
 When memories are recalled these are displayed in chat, along with their relevance score.
 
+### Memory Viewing
+
+You can view memories in a list, or a semantic map, by opening 'memory_viewer.html'. Just drag and drop memory.json in.
+
+![Memory viewer](https://github.com/user-attachments/assets/897437f5-1ba8-489f-8d33-51984c3a5fdf)
+
 ### Setup
 
-Add your OpenRouter API key to the config.yaml.
+See below.
 
 ## Slash Commands
 

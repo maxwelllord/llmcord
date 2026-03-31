@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Memory Viewer</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0d1117; color: #e6edf3;
+    padding: 24px; max-width: 960px; margin: 0 auto;
+  }
+  h1 { font-size: 1.4em; margin-bottom: 16px; color: #58a6ff; }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 0; margin-bottom: 16px; }
+  .tab {
+    padding: 8px 20px; background: #161b22; border: 1px solid #30363d;
+    color: #8b949e; font-size: 14px; cursor: pointer; transition: all 0.15s;
+  }
+  .tab:first-child { border-radius: 6px 0 0 6px; }
+  .tab:last-child { border-radius: 0 6px 6px 0; }
+  .tab.active { background: #58a6ff; color: #0d1117; border-color: #58a6ff; font-weight: 600; }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  /* Toolbar */
+  .toolbar {
+    display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; align-items: center;
+  }
+  .toolbar input[type="text"] {
+    flex: 1; min-width: 200px; padding: 8px 12px;
+    background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+    color: #e6edf3; font-size: 14px; outline: none;
+  }
+  .toolbar input[type="text"]:focus { border-color: #58a6ff; }
+  .toolbar select, .toolbar button {
+    padding: 8px 12px; background: #21262d; border: 1px solid #30363d;
+    border-radius: 6px; color: #e6edf3; font-size: 14px; cursor: pointer;
+  }
+  .toolbar button:hover { background: #30363d; }
+  .stats { font-size: 13px; color: #8b949e; margin-bottom: 12px; }
+
+  /* List */
+  .memory-list { display: flex; flex-direction: column; gap: 8px; }
+  .memory-card {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+    padding: 12px 16px; transition: border-color 0.15s;
+  }
+  .memory-card:hover { border-color: #58a6ff; }
+  .memory-card.deleted { opacity: 0.45; }
+  .memory-meta {
+    display: flex; gap: 12px; font-size: 12px; color: #8b949e; margin-bottom: 6px;
+    flex-wrap: wrap; align-items: center;
+  }
+  .memory-id { font-family: monospace; color: #58a6ff; }
+  .memory-date { color: #8b949e; }
+  .badge {
+    font-size: 11px; padding: 1px 6px; border-radius: 10px;
+    background: #da3633; color: #fff; font-weight: 600;
+  }
+  .memory-text { font-size: 14px; line-height: 1.5; white-space: pre-wrap; }
+  .highlight { background: #58a6ff33; border-radius: 2px; }
+  .pagination {
+    display: flex; gap: 8px; margin-top: 16px; justify-content: center; align-items: center;
+  }
+  .pagination button { min-width: 36px; }
+  .pagination span { font-size: 13px; color: #8b949e; }
+
+  /* Drop zone */
+  .drop-zone {
+    border: 2px dashed #30363d; border-radius: 12px; padding: 60px 24px;
+    text-align: center; color: #8b949e; font-size: 15px; cursor: pointer;
+    transition: border-color 0.2s;
+  }
+  .drop-zone:hover, .drop-zone.drag-over { border-color: #58a6ff; color: #e6edf3; }
+  .drop-zone input { display: none; }
+
+  /* Map */
+  #map-container { position: relative; }
+  #map-canvas {
+    width: 100%; height: 600px; background: #161b22;
+    border: 1px solid #30363d; border-radius: 8px; cursor: crosshair;
+  }
+  #tooltip {
+    display: none; position: absolute; pointer-events: none;
+    background: #1c2128; border: 1px solid #58a6ff; border-radius: 6px;
+    padding: 8px 12px; font-size: 13px; max-width: 350px;
+    line-height: 1.4; z-index: 10; color: #e6edf3;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  }
+  #tooltip .tip-id { font-family: monospace; color: #58a6ff; font-size: 11px; }
+  #tooltip .tip-date { color: #8b949e; font-size: 11px; margin-left: 8px; }
+  #tooltip .tip-text { margin-top: 4px; }
+  .map-toolbar {
+    display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; align-items: center;
+  }
+  .map-toolbar label { font-size: 13px; color: #8b949e; }
+  .map-toolbar select {
+    padding: 6px 10px; background: #21262d; border: 1px solid #30363d;
+    border-radius: 6px; color: #e6edf3; font-size: 13px;
+  }
+  .map-info { font-size: 12px; color: #8b949e; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+
+<h1>Memory Viewer</h1>
+
+<div id="drop-zone" class="drop-zone">
+  <p>Drop <strong>memory.json</strong> here or click to load</p>
+  <input type="file" id="file-input" accept=".json">
+</div>
+
+<div id="app" style="display:none">
+  <div class="tabs">
+    <div class="tab active" data-tab="list">List</div>
+    <div class="tab" data-tab="map">Semantic Map</div>
+  </div>
+
+  <!-- LIST TAB -->
+  <div id="tab-list" class="tab-content active">
+    <div class="toolbar">
+      <input type="text" id="search" placeholder="Search memories...">
+      <select id="filter">
+        <option value="active">Active</option>
+        <option value="deleted">Deleted</option>
+        <option value="all">All</option>
+      </select>
+      <select id="sort">
+        <option value="newest">Newest first</option>
+        <option value="oldest">Oldest first</option>
+        <option value="id">By ID</option>
+      </select>
+    </div>
+    <div class="stats" id="stats"></div>
+    <div class="memory-list" id="list"></div>
+    <div class="pagination" id="pagination"></div>
+  </div>
+
+  <!-- MAP TAB -->
+  <div id="tab-map" class="tab-content">
+    <div class="map-toolbar">
+      <label>X axis:</label>
+      <select id="axis-x">
+        <option value="0">PC 1</option>
+        <option value="1">PC 2</option>
+        <option value="2">PC 3</option>
+        <option value="3">PC 4</option>
+        <option value="4">PC 5</option>
+      </select>
+      <label>Y axis:</label>
+      <select id="axis-y">
+        <option value="0">PC 1</option>
+        <option value="1" selected>PC 2</option>
+        <option value="2">PC 3</option>
+        <option value="3">PC 4</option>
+        <option value="4">PC 5</option>
+      </select>
+      <label><input type="checkbox" id="show-deleted"> Show deleted</label>
+    </div>
+    <div class="map-info" id="map-info"></div>
+    <div id="map-container">
+      <canvas id="map-canvas"></canvas>
+      <div id="tooltip"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const PAGE_SIZE = 50;
+let allMemories = [];   // {id, text, created, deleted, vectorDim}
+let rawVectors = [];     // parallel array of Float64Arrays (kept for PCA)
+let pcaProjected = null; // Nx5 array after PCA
+let filtered = [];
+let page = 0;
+
+const $ = id => document.getElementById(id);
+
+// ===================== TABS =====================
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    $('tab-' + tab.dataset.tab).classList.add('active');
+    if (tab.dataset.tab === 'map' && pcaProjected) drawMap();
+  });
+});
+
+// ===================== FILE LOADING =====================
+const dropZone = $('drop-zone');
+const fileInput = $('file-input');
+
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault(); dropZone.classList.remove('drag-over');
+  if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => { if (fileInput.files[0]) loadFile(fileInput.files[0]); });
+
+function loadFile(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(reader.result);
+      const arr = Array.isArray(data) ? data : [];
+      allMemories = [];
+      rawVectors = [];
+
+      for (const m of arr) {
+        allMemories.push({
+          id: m.id || '?',
+          text: m.text || '',
+          created: m.created || '',
+          deleted: !!m.deleted,
+          vectorDim: Array.isArray(m.vector) ? m.vector.length : 0,
+        });
+        rawVectors.push(Array.isArray(m.vector) ? m.vector : []);
+      }
+
+      dropZone.style.display = 'none';
+      $('app').style.display = 'block';
+      applyFilters();
+      runPCA();
+    } catch (err) {
+      alert('Failed to parse JSON: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+}
+
+// ===================== LIST VIEW =====================
+$('search').addEventListener('input', () => { page = 0; applyFilters(); });
+$('filter').addEventListener('change', () => { page = 0; applyFilters(); });
+$('sort').addEventListener('change', () => { page = 0; applyFilters(); });
+
+function applyFilters() {
+  const query = $('search').value.toLowerCase();
+  const filterVal = $('filter').value;
+  const sortVal = $('sort').value;
+
+  filtered = allMemories.filter(m => {
+    if (filterVal === 'active' && m.deleted) return false;
+    if (filterVal === 'deleted' && !m.deleted) return false;
+    if (query && !m.text.toLowerCase().includes(query) && !m.id.toLowerCase().includes(query)) return false;
+    return true;
+  });
+
+  filtered.sort((a, b) => {
+    if (sortVal === 'newest') return (b.created || '').localeCompare(a.created || '');
+    if (sortVal === 'oldest') return (a.created || '').localeCompare(b.created || '');
+    return a.id.localeCompare(b.id);
+  });
+
+  const total = allMemories.length;
+  const active = allMemories.filter(m => !m.deleted).length;
+  const deleted = total - active;
+  $('stats').textContent = `${total} total \u2022 ${active} active \u2022 ${deleted} deleted \u2022 ${filtered.length} shown`;
+  render();
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function highlightText(text, query) {
+  if (!query) return escapeHtml(text);
+  const escaped = escapeHtml(text);
+  const re = new RegExp('(' + query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
+  return escaped.replace(re, '<span class="highlight">$1</span>');
+}
+
+function render() {
+  const query = $('search').value;
+  const start = page * PAGE_SIZE;
+  const slice = filtered.slice(start, start + PAGE_SIZE);
+
+  $('list').innerHTML = slice.map(m => `
+    <div class="memory-card${m.deleted ? ' deleted' : ''}">
+      <div class="memory-meta">
+        <span class="memory-id">${escapeHtml(m.id)}</span>
+        <span class="memory-date">${escapeHtml(m.created)}</span>
+        ${m.deleted ? '<span class="badge">deleted</span>' : ''}
+        ${m.vectorDim ? `<span style="color:#8b949e">${m.vectorDim}d vector</span>` : ''}
+      </div>
+      <div class="memory-text">${highlightText(m.text, query)}</div>
+    </div>
+  `).join('');
+
+  const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
+  $('pagination').innerHTML = totalPages > 1 ? `
+    <button onclick="goPage(0)" ${page===0?'disabled':''}>&#171;</button>
+    <button onclick="goPage(${page-1})" ${page===0?'disabled':''}>&#8249;</button>
+    <span>Page ${page+1} of ${totalPages}</span>
+    <button onclick="goPage(${page+1})" ${page>=totalPages-1?'disabled':''}>&#8250;</button>
+    <button onclick="goPage(${totalPages-1})" ${page>=totalPages-1?'disabled':''}>&#187;</button>
+  ` : '';
+}
+
+function goPage(p) {
+  page = Math.max(0, Math.min(p, Math.ceil(filtered.length / PAGE_SIZE) - 1));
+  render();
+  window.scrollTo(0, 0);
+}
+
+// ===================== PCA =====================
+function runPCA() {
+  // Only use active memories with vectors for PCA, but project all
+  const dim = rawVectors.find(v => v.length > 0)?.length || 0;
+  if (dim === 0) return;
+
+  // Get indices of valid vectors (non-empty)
+  const validIdx = [];
+  for (let i = 0; i < rawVectors.length; i++) {
+    if (rawVectors[i].length === dim) validIdx.push(i);
+  }
+  if (validIdx.length < 2) return;
+
+  const n = validIdx.length;
+  const numComponents = 5;
+
+  // Compute mean
+  const mean = new Float64Array(dim);
+  for (const i of validIdx) {
+    const v = rawVectors[i];
+    for (let d = 0; d < dim; d++) mean[d] += v[d];
+  }
+  for (let d = 0; d < dim; d++) mean[d] /= n;
+
+  // Center the data and build matrix (row-major)
+  const centered = [];
+  for (const i of validIdx) {
+    const row = new Float64Array(dim);
+    const v = rawVectors[i];
+    for (let d = 0; d < dim; d++) row[d] = v[d] - mean[d];
+    centered.push(row);
+  }
+
+  // Power iteration to find top-k principal components
+  const components = []; // each is a Float64Array of length dim
+  for (let k = 0; k < numComponents; k++) {
+    // Random init
+    let pc = new Float64Array(dim);
+    for (let d = 0; d < dim; d++) pc[d] = Math.random() - 0.5;
+
+    for (let iter = 0; iter < 100; iter++) {
+      // X^T * X * pc  (done as X^T * (X * pc) to avoid forming covariance)
+      // Step 1: proj = X * pc (n-vector)
+      const proj = new Float64Array(n);
+      for (let i = 0; i < n; i++) {
+        let dot = 0;
+        for (let d = 0; d < dim; d++) dot += centered[i][d] * pc[d];
+        proj[i] = dot;
+      }
+      // Step 2: new_pc = X^T * proj (dim-vector)
+      const newPc = new Float64Array(dim);
+      for (let i = 0; i < n; i++) {
+        const p = proj[i];
+        for (let d = 0; d < dim; d++) newPc[d] += centered[i][d] * p;
+      }
+
+      // Deflate: remove contribution of previous components
+      for (const prev of components) {
+        let dot = 0;
+        for (let d = 0; d < dim; d++) dot += newPc[d] * prev[d];
+        for (let d = 0; d < dim; d++) newPc[d] -= dot * prev[d];
+      }
+
+      // Normalize
+      let norm = 0;
+      for (let d = 0; d < dim; d++) norm += newPc[d] * newPc[d];
+      norm = Math.sqrt(norm);
+      if (norm < 1e-10) break;
+      for (let d = 0; d < dim; d++) newPc[d] /= norm;
+
+      pc = newPc;
+    }
+    components.push(pc);
+  }
+
+  // Project ALL memories onto the components
+  pcaProjected = [];
+  for (let i = 0; i < rawVectors.length; i++) {
+    if (rawVectors[i].length !== dim) {
+      pcaProjected.push(null);
+      continue;
+    }
+    const coords = new Float64Array(numComponents);
+    for (let k = 0; k < numComponents; k++) {
+      let dot = 0;
+      for (let d = 0; d < dim; d++) dot += (rawVectors[i][d] - mean[d]) * components[k][d];
+      coords[k] = dot;
+    }
+    pcaProjected.push(coords);
+  }
+
+  // Free raw vectors to save memory
+  rawVectors = [];
+
+  $('map-info').textContent = `PCA computed on ${n} memories (${dim}d vectors → 5 principal components). Pick any two axes to plot.`;
+}
+
+// ===================== MAP VIEW =====================
+const canvas = $('map-canvas');
+const ctx = canvas.getContext('2d');
+const tooltip = $('tooltip');
+let mapPoints = []; // [{x, y, idx}] in canvas coords
+
+$('axis-x').addEventListener('change', drawMap);
+$('axis-y').addEventListener('change', drawMap);
+$('show-deleted').addEventListener('change', drawMap);
+
+function drawMap() {
+  if (!pcaProjected) return;
+
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const w = rect.width;
+  const h = rect.height;
+  const pad = 40;
+
+  const axX = parseInt($('axis-x').value);
+  const axY = parseInt($('axis-y').value);
+  const showDel = $('show-deleted').checked;
+
+  // Gather points
+  const points = [];
+  for (let i = 0; i < allMemories.length; i++) {
+    if (!pcaProjected[i]) continue;
+    if (!showDel && allMemories[i].deleted) continue;
+    points.push({ px: pcaProjected[i][axX], py: pcaProjected[i][axY], idx: i });
+  }
+
+  if (points.length === 0) {
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = '#8b949e';
+    ctx.font = '14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('No points to display', w / 2, h / 2);
+    return;
+  }
+
+  // Compute bounds
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const p of points) {
+    if (p.px < minX) minX = p.px;
+    if (p.px > maxX) maxX = p.px;
+    if (p.py < minY) minY = p.py;
+    if (p.py > maxY) maxY = p.py;
+  }
+  const rangeX = maxX - minX || 1;
+  const rangeY = maxY - minY || 1;
+
+  const scaleX = (v) => pad + (v - minX) / rangeX * (w - 2 * pad);
+  const scaleY = (v) => h - pad - (v - minY) / rangeY * (h - 2 * pad);
+
+  // Clear and draw
+  ctx.clearRect(0, 0, w, h);
+
+  // Axes
+  ctx.strokeStyle = '#21262d';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(pad, pad); ctx.lineTo(pad, h - pad); ctx.lineTo(w - pad, h - pad);
+  ctx.stroke();
+
+  // Axis labels
+  ctx.fillStyle = '#8b949e';
+  ctx.font = '12px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(`PC ${axX + 1}`, w / 2, h - 8);
+  ctx.save();
+  ctx.translate(12, h / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText(`PC ${axY + 1}`, 0, 0);
+  ctx.restore();
+
+  // Compute canvas positions
+  mapPoints = [];
+  for (const p of points) {
+    const cx = scaleX(p.px);
+    const cy = scaleY(p.py);
+    mapPoints.push({ x: cx, y: cy, idx: p.idx });
+  }
+
+  // Date-based coloring
+  const dates = allMemories.map(m => m.created ? new Date(m.created).getTime() : 0);
+  const validDates = dates.filter(d => d > 0);
+  const minDate = Math.min(...validDates);
+  const maxDate = Math.max(...validDates);
+  const dateRange = maxDate - minDate || 1;
+
+  for (const pt of mapPoints) {
+    const m = allMemories[pt.idx];
+    const t = m.created ? (new Date(m.created).getTime() - minDate) / dateRange : 0.5;
+
+    // Gradient from purple (old) to cyan (new)
+    const r = Math.round(138 * (1 - t) + 56 * t);
+    const g = Math.round(43 * (1 - t) + 166 * t);
+    const b = Math.round(226 * (1 - t) + 255 * t);
+    const alpha = m.deleted ? 0.3 : 0.85;
+
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, 4, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(${r},${g},${b},${alpha})`;
+    ctx.fill();
+  }
+}
+
+// Hover tooltip
+canvas.addEventListener('mousemove', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+
+  let closest = null;
+  let closestDist = 20; // max pixel distance to trigger
+  for (const pt of mapPoints) {
+    const d = Math.hypot(pt.x - mx, pt.y - my);
+    if (d < closestDist) {
+      closestDist = d;
+      closest = pt;
+    }
+  }
+
+  if (closest) {
+    const m = allMemories[closest.idx];
+    const truncated = m.text.length > 200 ? m.text.slice(0, 200) + '...' : m.text;
+    tooltip.innerHTML = `
+      <span class="tip-id">${escapeHtml(m.id)}</span>
+      <span class="tip-date">${escapeHtml(m.created)}</span>
+      ${m.deleted ? ' <span class="badge">deleted</span>' : ''}
+      <div class="tip-text">${escapeHtml(truncated)}</div>
+    `;
+    tooltip.style.display = 'block';
+
+    // Position tooltip near cursor but keep in bounds
+    let tx = closest.x + 12;
+    let ty = closest.y - 10;
+    const tooltipRect = tooltip.getBoundingClientRect();
+    const containerRect = $('map-container').getBoundingClientRect();
+    if (tx + tooltipRect.width > containerRect.width - 8) tx = closest.x - tooltipRect.width - 12;
+    if (ty + tooltipRect.height > containerRect.height - 8) ty = closest.y - tooltipRect.height + 10;
+    if (ty < 0) ty = 4;
+    tooltip.style.left = tx + 'px';
+    tooltip.style.top = ty + 'px';
+  } else {
+    tooltip.style.display = 'none';
+  }
+});
+
+canvas.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+
+// Resize handler
+window.addEventListener('resize', () => { if (pcaProjected) drawMap(); });
+</script>
+</body>
+</html>

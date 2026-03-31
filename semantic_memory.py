@@ -17,6 +17,7 @@ from openai import AsyncOpenAI
 
 
 MEMORY_DIR = Path(__file__).parent / "memory"
+MEMORY_DIR.mkdir(exist_ok=True)
 CORE_MEMORY_FILE = MEMORY_DIR / "core_memory.md"
 MEMORY_JSON_FILE = MEMORY_DIR / "memory.json"
 
@@ -78,6 +79,7 @@ def load_core_memory() -> str:
 
 
 def save_core_memory(content: str) -> None:
+    MEMORY_DIR.mkdir(exist_ok=True)
     CORE_MEMORY_FILE.write_text(content, encoding="utf-8")
 
 

@@ -934,7 +934,10 @@ async def on_ready() -> None:
 
     _check_provider_api_keys(config)
 
-    await discord_bot.tree.sync()
+    try:
+        await discord_bot.tree.sync()
+    except discord.errors.DiscordServerError:
+        logging.warning("Failed to sync slash commands (Discord server error). Commands will sync on next successful startup.")
 
     # Start MCP client
     mcp_cfg = config.get("mcp", {})

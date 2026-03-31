@@ -20,6 +20,9 @@ context_gap_minutes: 120    # Minutes of silence before a context gap is inserte
 max_context_tokens: 10000   # Token budget for recent message context
 context_bridge_tokens: 1000 # Token budget for older "bridge" messages before a gap
 
+# To find Discord IDs: enable Developer Mode in Discord settings (App Settings > Advanced > Developer Mode),
+# then right-click any user, role, or channel and select "Copy ID".
+
 permissions:
   users:
     admin_ids: []       # Can switch models with /model and DM the bot even if allow_dms is false

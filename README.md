@@ -14,7 +14,7 @@ A discord bot with a simple but effective memory system.
 
 **Automatic memory retrieval** injects stored memories into the chat when they're semantically relevant.
 
-**Sliding chat context:** set a token budget and the context window automatically adjusts.
+**Sliding chat context** set a token budget and the context window automatically adjusts.
 
 ## How the Memory System Works
 
@@ -33,6 +33,7 @@ The bot tracks **sessions** based on a configurable inactivity gap (default 2 ho
 2. It sends them to the LLM along with all existing memories.
 3. The LLM decides what to **add**, **update**, or **delete** — keeping the memory store lean and accurate.
 4. Core memory is rewritten to stay under 15 lines, and stale semantic memories are pruned.
+5. Deleted memories are flagged as deleted in memory.json. You can restore these memories by
 
 You can also trigger a sweep manually at any time with the `/sweep` command.
 
@@ -45,9 +46,15 @@ When you send a message, the bot embeds your message and compares it against sto
 
 When memories are recalled these are displayed in chat, along with their relevance score.
 
+### Memory Viewing
+
+You can view memories in a list, or a semantic map, by opening 'memory_viewer.html'. Just drag and drop memory.json in.
+
+![Memory viewer](https://github.com/user-attachments/assets/897437f5-1ba8-489f-8d33-51984c3a5fdf)
+
 ### Setup
 
-Add your OpenRouter API key to the config.yaml.
+See below.
 
 ## Slash Commands
 
@@ -136,3 +143,19 @@ Add your OpenRouter API key to the config.yaml.
 | **context_gap_minutes** | Minutes of inactivity before a context gap is inserted. Messages before the gap are loaded as "bridge" context.<br /><br />Default: `120` |
 | **max_context_tokens** | Token budget for recent messages in the sliding context window.<br /><br />Default: `10,000` |
 | **context_bridge_tokens** | Token budget for older messages loaded before a context gap, giving the bot some history from before the silence.<br /><br />Default: `1,000` |
+
+## Debugging
+
+### Turn Logger (`turn_logger.py`)
+
+Every LLM call (both chat responses and memory sweeps) is logged to the `logs/` directory, organised by date. Each log file captures the full system prompt, message history, and model response for that turn so you can see exactly what models see and said each call.
+
+### Endpoint Tester (`test_endpoints.py`)
+
+A quick sanity check that your configured model endpoints are reachable. Run it with:
+
+```bash
+python test_endpoints.py
+```
+
+It sends a minimal request to each configured model (main and interjection) and reports whether the endpoint responded successfully.

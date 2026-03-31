@@ -136,3 +136,19 @@ Add your OpenRouter API key to the config.yaml.
 | **context_gap_minutes** | Minutes of inactivity before a context gap is inserted. Messages before the gap are loaded as "bridge" context.<br /><br />Default: `120` |
 | **max_context_tokens** | Token budget for recent messages in the sliding context window.<br /><br />Default: `10,000` |
 | **context_bridge_tokens** | Token budget for older messages loaded before a context gap, giving the bot some history from before the silence.<br /><br />Default: `1,000` |
+
+## Debugging
+
+### Turn Logger (`turn_logger.py`)
+
+Every LLM call (both chat responses and memory sweeps) is logged to the `logs/` directory, organised by date. Each log file captures the full system prompt, message history, and model response for that turn so you can see exactly what models see and said each call.
+
+### Endpoint Tester (`test_endpoints.py`)
+
+A quick sanity check that your configured model endpoints are reachable. Run it with:
+
+```bash
+python test_endpoints.py
+```
+
+It sends a minimal request to each configured model (main and interjection) and reports whether the endpoint responded successfully.

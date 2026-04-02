@@ -393,7 +393,7 @@ async def _build_chain_common(
     messages: list[dict] = []
     warnings: set[str] = set()
 
-    context_gap_minutes = cfg.get("context_gap_minutes", 10)
+    context_gap_minutes = cfg.get("context_gap_minutes", 120)
     context_bridge_tokens = cfg.get("context_bridge_tokens", 1000)
 
     recent_msgs: list[discord.Message] = []
@@ -758,7 +758,7 @@ async def cleanup_old_nodes() -> None:
 @discord_bot.tree.command(name="info", description="Estimate the number of tokens in the current chat context")
 async def info_command(interaction: discord.Interaction) -> None:
     cfg = await asyncio.to_thread(get_config)
-    context_gap_minutes = cfg.get("context_gap_minutes", 10)
+    context_gap_minutes = cfg.get("context_gap_minutes", 120)
     max_context_tokens = cfg.get("max_context_tokens", 10000)
     context_bridge_tokens = cfg.get("context_bridge_tokens", 1000)
 
@@ -1011,12 +1011,14 @@ async def on_message(new_msg: discord.Message) -> None:
         emb_client, emb_model = create_embedding_client(cfg)
 
         # --- Memory sweep ---
+        context_gap_minutes = cfg.get("context_gap_minutes", 120)
         channel_injected = session_injected_ids.get(new_msg.channel.id, set())
         new_session = await check_and_run_memory_sweep(
             new_msg, discord_bot.user, openai_client, model,
             injected_ids=channel_injected,
             embedding_model=emb_model,
             embedding_client=emb_client,
+            gap_minutes=context_gap_minutes,
             extra_headers=extra_headers, extra_query=extra_query, extra_body=extra_body,
         )
         if new_session:

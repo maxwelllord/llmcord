@@ -100,6 +100,7 @@ last_task_time = 0
 active_channels: set[int] = set()
 channel_locks: dict[int, asyncio.Lock] = {}
 session_injected_ids: dict[int, set[str]] = {}  # channel_id -> set of memory IDs injected this session
+show_memories_in_chat: dict[int, bool] = {}  # channel_id -> whether to show recalled memories in chat
 
 
 intents = discord.Intents.default()
@@ -375,6 +376,63 @@ async def check_interjection(new_msg: discord.Message, cfg: dict) -> bool:
 # Message chain builders
 # ---------------------------------------------------------------------------
 
+async def _scan_context_messages(
+    channel: discord.abc.Messageable,
+    context_gap_minutes: int,
+    max_context_tokens: int,
+    context_bridge_tokens: int,
+    before: discord.Message | None = None,
+    start_time: datetime | None = None,
+    skip_msg_ids: set[int] | None = None,
+) -> tuple[list[discord.Message], list[discord.Message], int, int, float]:
+    """Scan channel history for context messages with gap detection and token budget.
+
+    Returns (recent_msgs, bridge_msgs, recent_tokens, bridge_tokens, gap_minutes).
+    """
+    recent_msgs: list[discord.Message] = []
+    bridge_msgs: list[discord.Message] = []
+    recent_tokens = 0
+    bridge_tokens = 0
+    gap_found = False
+    gap_minutes = 0.0
+    prev_msg_time = start_time or datetime.now(timezone.utc)
+
+    history_kwargs: dict[str, Any] = dict(limit=MAX_MESSAGES)
+    if before is not None:
+        history_kwargs["before"] = before
+
+    async for msg in channel.history(**history_kwargs):
+        if msg.type not in (discord.MessageType.default, discord.MessageType.reply):
+            continue
+        if skip_msg_ids and msg.id in skip_msg_ids:
+            continue
+
+        if not gap_found:
+            time_gap = (prev_msg_time - msg.created_at).total_seconds() / 60
+            if recent_msgs and time_gap > context_gap_minutes:
+                gap_found = True
+                gap_minutes = time_gap
+            else:
+                msg_tokens = estimate_tokens(msg.content)
+                if recent_tokens + msg_tokens > max_context_tokens:
+                    break
+                recent_tokens += msg_tokens
+                recent_msgs.append(msg)
+                prev_msg_time = msg.created_at
+                continue
+
+        # Collecting bridge messages (gap was found)
+        if context_bridge_tokens <= 0:
+            break
+        msg_tokens = estimate_tokens(msg.content)
+        if bridge_tokens + msg_tokens > context_bridge_tokens:
+            break
+        bridge_tokens += msg_tokens
+        bridge_msgs.append(msg)
+
+    return recent_msgs, bridge_msgs, recent_tokens, bridge_tokens, gap_minutes
+
+
 async def _build_chain_common(
     new_msg: discord.Message,
     cfg: dict,
@@ -396,42 +454,15 @@ async def _build_chain_common(
     context_gap_minutes = cfg.get("context_gap_minutes", 120)
     context_bridge_tokens = cfg.get("context_bridge_tokens", 1000)
 
-    recent_msgs: list[discord.Message] = []
-    bridge_msgs: list[discord.Message] = []
-    estimated_tokens = 0
-    prev_msg_time = new_msg.created_at
-    gap_found = False
-    gap_minutes = 0
-    bridge_tokens = 0
-
-    async for msg in new_msg.channel.history(limit=MAX_MESSAGES, before=new_msg):
-        if msg.type not in (discord.MessageType.default, discord.MessageType.reply):
-            continue
-        if skip_msg_ids and msg.id in skip_msg_ids:
-            continue
-
-        if not gap_found:
-            time_gap = (prev_msg_time - msg.created_at).total_seconds() / 60
-            if time_gap > context_gap_minutes:
-                gap_found = True
-                gap_minutes = time_gap
-            else:
-                msg_tokens = estimate_tokens(msg.content)
-                if estimated_tokens + msg_tokens > max_context_tokens:
-                    break
-                estimated_tokens += msg_tokens
-                recent_msgs.append(msg)
-                prev_msg_time = msg.created_at
-                continue
-
-        # Collecting bridge messages (gap was found)
-        if context_bridge_tokens <= 0:
-            break
-        msg_tokens = estimate_tokens(msg.content)
-        if bridge_tokens + msg_tokens > context_bridge_tokens:
-            break
-        bridge_tokens += msg_tokens
-        bridge_msgs.append(msg)
+    recent_msgs, bridge_msgs, _, _, gap_minutes = await _scan_context_messages(
+        channel=new_msg.channel,
+        context_gap_minutes=context_gap_minutes,
+        max_context_tokens=max_context_tokens,
+        context_bridge_tokens=context_bridge_tokens,
+        before=new_msg,
+        start_time=new_msg.created_at,
+        skip_msg_ids=skip_msg_ids,
+    )
 
     # Build bridge messages (oldest first)
     for msg in reversed(bridge_msgs):
@@ -758,56 +789,65 @@ async def cleanup_old_nodes() -> None:
 @discord_bot.tree.command(name="info", description="Estimate the number of tokens in the current chat context")
 async def info_command(interaction: discord.Interaction) -> None:
     cfg = await asyncio.to_thread(get_config)
-    context_gap_minutes = cfg.get("context_gap_minutes", 120)
     max_context_tokens = cfg.get("max_context_tokens", 10000)
+    context_gap_minutes = cfg.get("context_gap_minutes", 120)
     context_bridge_tokens = cfg.get("context_bridge_tokens", 1000)
 
+    # --- System prompt + core memory ---
+    system_prompt = build_system_prompt(cfg)
+    system_tokens = estimate_tokens(system_prompt) if system_prompt else 0
+
+    # --- MCP tool definitions ---
+    tools = mcp_client.tools if mcp_client.is_ready() else []
+    tool_tokens = estimate_tokens(json.dumps(tools)) if tools else 0
+
+    # --- Message budget after reserving for system/tools ---
+    reserved_tokens = system_tokens + tool_tokens
+    message_budget = max(0, max_context_tokens - reserved_tokens)
+
+    # --- Scan messages using shared logic ---
     channel = interaction.channel
-    estimated_tokens = 0
-    msg_count = 0
-    bridge_count = 0
-    bridge_tokens = 0
-    prev_msg_time = datetime.now(timezone.utc)
-    earliest_time = prev_msg_time
-    gap_found = False
+    recent_msgs, bridge_msgs, recent_tokens, bridge_tokens, _ = await _scan_context_messages(
+        channel=channel,
+        context_gap_minutes=context_gap_minutes,
+        max_context_tokens=message_budget,
+        context_bridge_tokens=context_bridge_tokens,
+    )
 
-    async for msg in channel.history(limit=MAX_MESSAGES):
-        if msg.type not in (discord.MessageType.default, discord.MessageType.reply):
-            continue
+    msg_count = len(recent_msgs)
+    bridge_count = len(bridge_msgs)
+    message_tokens = recent_tokens + bridge_tokens
+    total_tokens = reserved_tokens + message_tokens
 
-        if not gap_found:
-            time_gap = (prev_msg_time - msg.created_at).total_seconds() / 60
-            if msg_count > 0 and time_gap > context_gap_minutes:
-                gap_found = True
-            else:
-                msg_tokens = estimate_tokens(msg.content)
-                if msg_count > 0 and estimated_tokens + msg_tokens > max_context_tokens:
-                    break
-                estimated_tokens += msg_tokens
-                msg_count += 1
-                earliest_time = msg.created_at
-                prev_msg_time = msg.created_at
-                continue
-
-        # Bridge messages
-        if context_bridge_tokens <= 0:
-            break
-        msg_tokens = estimate_tokens(msg.content)
-        if bridge_tokens + msg_tokens > context_bridge_tokens:
-            break
-        bridge_tokens += msg_tokens
-        bridge_count += 1
-        earliest_time = msg.created_at
-
-    total_tokens = estimated_tokens + bridge_tokens
+    earliest_time = (
+        bridge_msgs[-1].created_at if bridge_msgs
+        else recent_msgs[-1].created_at if recent_msgs
+        else datetime.now(timezone.utc)
+    )
     earliest_ts = int(earliest_time.timestamp())
-    bridge_info = f"\nBridge messages: {bridge_count} (~{int(bridge_tokens):,} tokens)" if bridge_count else ""
+
+    # --- Format output ---
+    lines = ["**Context estimate:**"]
+    lines.append(f"Messages: {msg_count} (~{int(recent_tokens):,} tokens)")
+    if bridge_count:
+        lines.append(f"Bridge messages: {bridge_count} (~{int(bridge_tokens):,} tokens)")
+    lines.append(f"System prompt: ~{system_tokens:,} tokens")
+    if tool_tokens:
+        lines.append(f"MCP tools ({len(tools)}): ~{tool_tokens:,} tokens")
+    lines.append(f"**Total: ~{int(total_tokens):,} / {max_context_tokens:,} tokens**")
+    lines.append(f"Earliest message: <t:{earliest_ts}:R>")
+
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+@discord_bot.tree.command(name="memories", description="Toggle whether recalled memories are shown in chat")
+async def memories_command(interaction: discord.Interaction) -> None:
+    channel_id = interaction.channel_id
+    current = show_memories_in_chat.get(channel_id, True)
+    show_memories_in_chat[channel_id] = not current
+    state = "shown" if not current else "hidden"
     await interaction.response.send_message(
-        f"**Context estimate:**\n"
-        f"Messages: {msg_count}{bridge_info}\n"
-        f"Estimated tokens: ~{int(total_tokens):,}\n"
-        f"Earliest message: <t:{earliest_ts}:R>\n"
-        f"Max context tokens: {max_context_tokens:,}",
+        f"Recalled memories will now be **{state}** in chat.",
         ephemeral=True,
     )
 
@@ -993,16 +1033,26 @@ async def on_message(new_msg: discord.Message) -> None:
         max_images = cfg.get("max_images", 5) if accept_images else 0
         max_context_tokens = cfg.get("max_context_tokens", 10000)
 
+        # --- Reserve token budget for system prompt, tools, and memory ---
+        system_prompt_preview = build_system_prompt(cfg)
+        system_tokens = estimate_tokens(system_prompt_preview) if system_prompt_preview else 0
+
+        tools_preview = mcp_client.tools if mcp_client.is_ready() else []
+        tool_tokens = estimate_tokens(json.dumps(tools_preview)) if tools_preview else 0
+
+        reserved_tokens = system_tokens + tool_tokens
+        message_budget = max(0, max_context_tokens - reserved_tokens)
+
         # --- Build message chain ---
         nodes_needing_descriptions: list[MsgNode] = []
 
         if is_thread:
             messages, user_warnings, earliest_msg_time = await build_chain_thread(
-                new_msg, cfg, max_text, max_images, max_context_tokens, nodes_needing_descriptions,
+                new_msg, cfg, max_text, max_images, message_budget, nodes_needing_descriptions,
             )
         else:
             messages, user_warnings, earliest_msg_time = await build_chain_simple(
-                new_msg, cfg, max_text, max_images, max_context_tokens, nodes_needing_descriptions,
+                new_msg, cfg, max_text, max_images, message_budget, nodes_needing_descriptions,
             )
 
         logging.info(f"Message received (user ID: {new_msg.author.id}, attachments: {len(new_msg.attachments)}, conversation length: {len(messages)}):\n{new_msg.content}")
@@ -1052,11 +1102,12 @@ async def on_message(new_msg: discord.Message) -> None:
                     channel_injected.update(m["id"] for m in retrieved)
                     logging.info(f"Injected {len(retrieved)} memories: {[m['id'] for m in retrieved]}")
 
-                    # Show recalled memories in chat (subtext so it's stripped from LLM context)
-                    recall_lines = [f"-# `{m['id']}` ({m['score']:.2f}) {m['text'][:80]}" for m in retrieved]
-                    await new_msg.channel.send(
-                        f"-# 🔍 Recalled {len(retrieved)} memories:\n" + "\n".join(recall_lines)
-                    )
+                    # Show recalled memories in chat unless hidden
+                    if show_memories_in_chat.get(new_msg.channel.id, True):
+                        recall_lines = [f"-# `{m['id']}` ({m['score']:.2f}) {m['text'][:80]}" for m in retrieved]
+                        await new_msg.channel.send(
+                            f"-# 🔍 Recalled {len(retrieved)} memories:\n" + "\n".join(recall_lines)
+                        )
 
             except Exception:
                 logging.exception("Semantic memory retrieval failed")

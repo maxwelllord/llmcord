@@ -105,6 +105,7 @@ last_task_time = 0
 active_channels: set[int] = set()
 channel_locks: dict[int, asyncio.Lock] = {}
 session_injected_ids: dict[int, set[str]] = {}  # channel_id -> set of memory IDs injected this session
+pending_recall_ids: dict[int, list[str]] = {}  # channel_id -> memory IDs to force-inject on next message
 show_memories_in_chat: dict[int, bool] = {}  # channel_id -> whether to show recalled memories in chat
 
 
@@ -952,6 +953,23 @@ async def clear_command(interaction: discord.Interaction) -> None:
     await interaction.response.send_message("Context cleared — messages before this point will be excluded.", ephemeral=True)
 
 
+@discord_bot.tree.command(name="recall", description="Manually recall a memory by ID into the next message context")
+async def recall_command(interaction: discord.Interaction, memory_id: str) -> None:
+    from semantic_memory import get_active_memories
+
+    memories = get_active_memories()
+    match = next((m for m in memories if m["id"] == memory_id), None)
+    if not match:
+        await interaction.response.send_message(f"Memory `{memory_id}` not found.", ephemeral=True)
+        return
+
+    channel_id = interaction.channel_id
+    pending_recall_ids.setdefault(channel_id, []).append(memory_id)
+    await interaction.response.send_message(
+        f"-# 📌 Queued memory for recall:\n-# `{match['id']}` {match['text'][:100]}",
+    )
+
+
 def _check_provider_api_keys(cfg: dict) -> None:
     """Warn on startup if any actively-used remote provider is missing an API key."""
     models_to_check: list[tuple[str, str]] = []  # (label, provider/model)
@@ -1148,6 +1166,30 @@ async def on_message(new_msg: discord.Message) -> None:
 
             except Exception:
                 logging.exception("Semantic memory retrieval failed")
+
+        # --- Manual memory recall via /recall ---
+        manual_ids = pending_recall_ids.pop(new_msg.channel.id, [])
+        if manual_ids:
+            from semantic_memory import get_active_memories
+            all_memories = get_active_memories()
+            manual_memories = [m for m in all_memories if m["id"] in manual_ids]
+            if manual_memories:
+                memory_block = "\n".join(
+                    f"[Memory {m['id']}: {m['text']}]" for m in manual_memories
+                )
+                for msg_dict in reversed(messages):
+                    if msg_dict["role"] == "user":
+                        if isinstance(msg_dict["content"], str):
+                            msg_dict["content"] += f"\n\n{memory_block}"
+                        elif isinstance(msg_dict["content"], list):
+                            for part in msg_dict["content"]:
+                                if part.get("type") == "text":
+                                    part["text"] += f"\n\n{memory_block}"
+                                    break
+                        break
+                channel_injected = session_injected_ids.setdefault(new_msg.channel.id, set())
+                channel_injected.update(m["id"] for m in manual_memories)
+                logging.info(f"Manually recalled {len(manual_memories)} memories: {[m['id'] for m in manual_memories]}")
 
         # --- System prompt & message ordering ---
         ordered_messages = messages

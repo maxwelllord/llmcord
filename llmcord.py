@@ -413,16 +413,16 @@ async def _scan_context_messages(
         if skip_msg_ids and msg.id in skip_msg_ids:
             continue
 
+        # /clear acts as a hard context boundary — stop before older messages
+        if clear_time and msg.created_at < clear_time:
+            break
+
         if not gap_found:
             time_gap = (prev_msg_time - msg.created_at).total_seconds() / 60
             if recent_msgs and time_gap > context_gap_minutes:
-                # If /clear was used during (or after) this gap, ignore it
-                if clear_time and clear_time > msg.created_at:
-                    pass  # skip gap detection, treat as continuous
-                else:
-                    gap_found = True
-                    gap_minutes = time_gap
-            if not gap_found:
+                gap_found = True
+                gap_minutes = time_gap
+            else:
                 msg_tokens = estimate_tokens(msg.content)
                 if recent_tokens + msg_tokens > max_context_tokens:
                     break
@@ -946,10 +946,10 @@ async def sweep_command(interaction: discord.Interaction) -> None:
     session_injected_ids.pop(interaction.channel.id, None)
 
 
-@discord_bot.tree.command(name="clear", description="Override context gap — include all messages since now as continuous context")
+@discord_bot.tree.command(name="clear", description="Clear context — messages before this point won't be included")
 async def clear_command(interaction: discord.Interaction) -> None:
     await clear_store.set_clear_time(interaction.channel_id, datetime.now(timezone.utc))
-    await interaction.response.send_message("Context gap override set — previous messages will be included as continuous context.", ephemeral=True)
+    await interaction.response.send_message("Context cleared — messages before this point will be excluded.", ephemeral=True)
 
 
 def _check_provider_api_keys(cfg: dict) -> None:

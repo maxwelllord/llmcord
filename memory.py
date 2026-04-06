@@ -58,6 +58,44 @@ memory_store = MemoryStore(
 
 
 # ---------------------------------------------------------------------------
+# Clear store – persists /clear timestamps to override context_gap_minutes
+# ---------------------------------------------------------------------------
+
+class ClearStore:
+    """Tracks per-channel /clear timestamps."""
+
+    def __init__(self, clear_state_file: Path):
+        self._file = clear_state_file
+        self._lock = asyncio.Lock()
+
+    async def get_clear_time(self, channel_id: int) -> datetime | None:
+        async with self._lock:
+            state = self._load()
+            ts = state.get(str(channel_id))
+            return datetime.fromisoformat(ts) if ts else None
+
+    async def set_clear_time(self, channel_id: int, dt: datetime) -> None:
+        async with self._lock:
+            state = self._load()
+            state[str(channel_id)] = dt.isoformat()
+            self._save(state)
+
+    def _load(self) -> dict[str, str]:
+        try:
+            return json.loads(self._file.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _save(self, state: dict[str, str]) -> None:
+        self._file.write_text(json.dumps(state), encoding="utf-8")
+
+
+clear_store = ClearStore(
+    clear_state_file=Path(__file__).parent / "memory" / "clear_state.json",
+)
+
+
+# ---------------------------------------------------------------------------
 # Sweep prompt
 # ---------------------------------------------------------------------------
 

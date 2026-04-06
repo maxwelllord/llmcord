@@ -24,7 +24,7 @@ from anthropic import AsyncAnthropic
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from memory import check_and_run_memory_sweep, collect_since_last_sweep, run_memory_sweep
+from memory import check_and_run_memory_sweep, clear_store, collect_since_last_sweep, run_memory_sweep
 from semantic_memory import load_core_memory, retrieve_memories
 from turn_logger import log_message_turn
 
@@ -389,6 +389,7 @@ async def _scan_context_messages(
     before: discord.Message | None = None,
     start_time: datetime | None = None,
     skip_msg_ids: set[int] | None = None,
+    clear_time: datetime | None = None,
 ) -> tuple[list[discord.Message], list[discord.Message], int, int, float]:
     """Scan channel history for context messages with gap detection and token budget.
 
@@ -411,6 +412,10 @@ async def _scan_context_messages(
             continue
         if skip_msg_ids and msg.id in skip_msg_ids:
             continue
+
+        # /clear acts as a hard context boundary — stop before older messages
+        if clear_time and msg.created_at < clear_time:
+            break
 
         if not gap_found:
             time_gap = (prev_msg_time - msg.created_at).total_seconds() / 60
@@ -459,6 +464,8 @@ async def _build_chain_common(
     context_gap_minutes = cfg.get("context_gap_minutes", 120)
     context_bridge_tokens = cfg.get("context_bridge_tokens", 1000)
 
+    channel_clear_time = await clear_store.get_clear_time(new_msg.channel.id)
+
     recent_msgs, bridge_msgs, _, _, gap_minutes = await _scan_context_messages(
         channel=new_msg.channel,
         context_gap_minutes=context_gap_minutes,
@@ -467,6 +474,7 @@ async def _build_chain_common(
         before=new_msg,
         start_time=new_msg.created_at,
         skip_msg_ids=skip_msg_ids,
+        clear_time=channel_clear_time,
     )
 
     # Build bridge messages (oldest first)
@@ -816,11 +824,13 @@ async def info_command(interaction: discord.Interaction) -> None:
 
     # --- Scan messages using shared logic ---
     channel = interaction.channel
+    channel_clear_time = await clear_store.get_clear_time(channel.id)
     recent_msgs, bridge_msgs, recent_tokens, bridge_tokens, _ = await _scan_context_messages(
         channel=channel,
         context_gap_minutes=context_gap_minutes,
         max_context_tokens=message_budget,
         context_bridge_tokens=context_bridge_tokens,
+        clear_time=channel_clear_time,
     )
 
     msg_count = len(recent_msgs)
@@ -934,6 +944,12 @@ async def sweep_command(interaction: discord.Interaction) -> None:
 
     # Clear injected IDs for this channel since we just swept
     session_injected_ids.pop(interaction.channel.id, None)
+
+
+@discord_bot.tree.command(name="clear", description="Clear context — messages before this point won't be included")
+async def clear_command(interaction: discord.Interaction) -> None:
+    await clear_store.set_clear_time(interaction.channel_id, datetime.now(timezone.utc))
+    await interaction.response.send_message("Context cleared — messages before this point will be excluded.", ephemeral=True)
 
 
 def _check_provider_api_keys(cfg: dict) -> None:

@@ -414,9 +414,12 @@ async def _scan_context_messages(
         if skip_msg_ids and msg.id in skip_msg_ids:
             continue
 
-        # /clear acts as a hard context boundary — stop before older messages
+        # /clear acts as a context boundary — treat it like a gap so bridge can collect older messages
         if clear_time and msg.created_at < clear_time:
-            break
+            if not gap_found:
+                gap_found = True
+                gap_minutes = (prev_msg_time - msg.created_at).total_seconds() / 60
+            # Fall through to bridge collection below
 
         if not gap_found:
             time_gap = (prev_msg_time - msg.created_at).total_seconds() / 60

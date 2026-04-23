@@ -19,6 +19,25 @@ from turn_logger import log_sweep_turn
 MAX_MESSAGES_SANITY = 500
 
 
+def _extract_message_text(msg: discord.Message) -> str:
+    """Extract readable text from a Discord message.
+
+    Assistant replies are sent as embeds, so msg.content is empty for them —
+    we must also pull embed title/description/footer and text_display components.
+    """
+    parts: list[str] = []
+    if msg.content:
+        parts.append(msg.content)
+    for embed in msg.embeds:
+        embed_text = "\n".join(filter(None, (embed.title, embed.description, embed.footer.text)))
+        if embed_text:
+            parts.append(embed_text)
+    for component in msg.components:
+        if component.type == discord.ComponentType.text_display:
+            parts.append(component.content)
+    return "\n".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Memory store
 # ---------------------------------------------------------------------------
@@ -187,7 +206,7 @@ async def collect_previous_session(
         if found_session_start:
             # Collect all messages back to last sweep — don't stop at intermediate gaps
             author = "Assistant" if msg.author == bot_user else msg.author.display_name
-            session_msgs.append(dict(author=author, content=msg.content))
+            session_msgs.append(dict(author=author, content=_extract_message_text(msg)))
 
         prev_time = msg.created_at
 
@@ -210,7 +229,7 @@ async def collect_since_last_sweep(
             break
 
         author = "Assistant" if msg.author == bot_user else msg.author.display_name
-        session_msgs.append(dict(author=author, content=msg.content))
+        session_msgs.append(dict(author=author, content=_extract_message_text(msg)))
 
     session_msgs.reverse()
     return session_msgs

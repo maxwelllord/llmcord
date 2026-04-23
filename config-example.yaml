@@ -111,6 +111,8 @@ models:
 
   ollama/llama4:
 
+sweep_model:
+
 
 # Interjection: use a small model to decide if the bot should respond without being @mentioned.
 # Omit or leave blank to only respond when @mentioned (default behavior).

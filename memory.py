@@ -273,12 +273,25 @@ async def run_memory_sweep(
             extra_query=api_kwargs.get("extra_query"),
             extra_body=api_kwargs.get("extra_body"),
         )
-        output = resp.choices[0].message.content.strip()
+        output = (resp.choices[0].message.content or "").strip()
+        finish_reason = resp.choices[0].finish_reason if resp.choices else "unknown"
+        usage = getattr(resp, "usage", None)
 
         try:
             log_sweep_turn(model=model, prompt=prompt, output=output)
         except Exception:
             logging.exception("Failed to write sweep log")
+
+        # Guard: if the model returned empty or unparseable output, don't
+        # advance the sweep timestamp — treat it as a failed sweep so the
+        # same messages will be swept again next time.
+        if not output or "=== CORE MEMORY ===" not in output:
+            diag = f"finish_reason={finish_reason}"
+            if usage:
+                diag += f", prompt_tokens={getattr(usage, 'prompt_tokens', '?')}, completion_tokens={getattr(usage, 'completion_tokens', '?')}"
+            logging.warning(f"Sweep returned empty or malformed output — {diag}")
+            await channel.send(f"🧠 Memory sweep got an empty/malformed response ({diag}) — will retry next time.")
+            return
 
         # Use the embedding client for operations (ADD/UPDATE need embeddings)
         emb_client = embedding_client or openai_client

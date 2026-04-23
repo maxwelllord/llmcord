@@ -122,35 +122,47 @@ httpx_client = httpx.AsyncClient()
 # ---------------------------------------------------------------------------
 
 class MCPClient:
-    """Manages persistent connection to local MCP server."""
+    """Manages persistent connections to one or more MCP servers."""
 
     def __init__(self):
-        self.session: Optional[ClientSession] = None
         self.tools: list[dict] = []
         self.initialized = asyncio.Event()
-        self._error: Optional[str] = None
+        self._errors: dict[str, str] = {}
+        # Maps tool name -> (server_name, session) for routing calls
+        self._tool_sessions: dict[str, tuple[str, ClientSession]] = {}
+        self._sessions: dict[str, ClientSession] = {}
+        self._ready_count = 0
+        self._expected_count = 0
 
-    async def start(self, server_params: StdioServerParameters) -> None:
-        """Start and maintain MCP connection (run as background task)."""
+    async def start_server(self, name: str, server_params: StdioServerParameters) -> None:
+        """Start and maintain a single MCP server connection (run as background task)."""
         try:
             async with stdio_client(server_params) as (read, write):
                 async with ClientSession(read, write) as session:
-                    self.session = session
                     await session.initialize()
+                    self._sessions[name] = session
 
-                    # List available tools
                     tools_result = await session.list_tools()
-                    self.tools = self._convert_tools_to_anthropic(tools_result.tools)
+                    converted = self._convert_tools_to_anthropic(tools_result.tools)
 
-                    logging.info(f"MCP client connected with {len(self.tools)} tools: {[t['name'] for t in self.tools]}")
-                    self.initialized.set()
+                    # Register tools and map them to this session
+                    for tool in converted:
+                        self._tool_sessions[tool["name"]] = (name, session)
+                    self.tools.extend(converted)
+
+                    logging.info(f"MCP server '{name}' connected with {len(converted)} tools: {[t['name'] for t in converted]}")
+                    self._ready_count += 1
+                    if self._ready_count >= self._expected_count:
+                        self.initialized.set()
 
                     # Keep connection alive
                     await asyncio.Event().wait()
         except Exception as e:
-            self._error = str(e)
-            logging.exception("MCP client failed to start")
-            self.initialized.set()  # Unblock waiters even on error
+            self._errors[name] = str(e)
+            logging.exception("MCP server '%s' failed to start", name)
+            self._ready_count += 1
+            if self._ready_count >= self._expected_count:
+                self.initialized.set()
 
     def _convert_tools_to_anthropic(self, mcp_tools) -> list[dict]:
         """Convert MCP tool definitions to Anthropic format."""
@@ -165,11 +177,13 @@ class MCPClient:
 
     async def call_tool(self, name: str, tool_input: dict) -> str:
         """Call an MCP tool and return the result as string."""
-        if not self.session:
-            return "Error: MCP session not available"
+        entry = self._tool_sessions.get(name)
+        if not entry:
+            return f"Error: unknown MCP tool '{name}'"
+        server_name, session = entry
 
         try:
-            result = await self.session.call_tool(name, tool_input)
+            result = await session.call_tool(name, tool_input)
 
             # Convert result to string
             if result.content:
@@ -182,12 +196,12 @@ class MCPClient:
                 return "\n".join(parts)
             return "Tool executed successfully (no output)"
         except Exception as e:
-            logging.exception("Error calling MCP tool %s", name)
+            logging.exception("Error calling MCP tool %s on server %s", name, server_name)
             return f"Error calling tool: {str(e)}"
 
     def is_ready(self) -> bool:
-        """Check if MCP client is ready to use."""
-        return self.session is not None and self._error is None
+        """Check if at least one MCP server connected successfully."""
+        return len(self._tool_sessions) > 0
 
 
 mcp_client = MCPClient()
@@ -925,8 +939,9 @@ async def sweep_command(interaction: discord.Interaction) -> None:
 
     await interaction.response.send_message("🧠 Manual sweep starting...", ephemeral=True)
 
-    # Set up LLM client
-    openai_client, model, api_kwargs = create_provider_client(cfg, curr_model)
+    # Set up LLM client — use sweep_model if configured, otherwise fall back to main model
+    sweep_model = cfg.get("sweep_model", curr_model)
+    openai_client, model, api_kwargs = create_provider_client(cfg, sweep_model)
     extra_headers = api_kwargs["extra_headers"]
     extra_query = api_kwargs["extra_query"]
     extra_body = api_kwargs["extra_body"]
@@ -1031,22 +1046,36 @@ async def on_ready() -> None:
     except discord.errors.DiscordServerError:
         logging.warning("Failed to sync slash commands (Discord server error). Commands will sync on next successful startup.")
 
-    # Start MCP client
+    # Start MCP client(s)
     mcp_cfg = config.get("mcp", {})
     if mcp_cfg.get("enabled", False):
-        logging.info("Starting MCP client...")
-        mcp_server_params = StdioServerParameters(
-            command=mcp_cfg.get("command", "python"),
-            args=mcp_cfg.get("args", []),
-            env=mcp_cfg.get("env"),
-        )
-        asyncio.create_task(mcp_client.start(mcp_server_params))
-        await mcp_client.initialized.wait()
+        servers = mcp_cfg.get("servers", {})
+        if not servers:
+            # Backwards compat: old single-server format (command/args/env at top level)
+            if mcp_cfg.get("command"):
+                servers = {"default": {
+                    "command": mcp_cfg["command"],
+                    "args": mcp_cfg.get("args", []),
+                    "env": mcp_cfg.get("env"),
+                }}
+
+        mcp_client._expected_count = len(servers)
+        for name, srv_cfg in servers.items():
+            logging.info("Starting MCP server '%s'...", name)
+            params = StdioServerParameters(
+                command=srv_cfg.get("command", "python"),
+                args=srv_cfg.get("args", []),
+                env=srv_cfg.get("env"),
+            )
+            asyncio.create_task(mcp_client.start_server(name, params))
+
+        if servers:
+            await mcp_client.initialized.wait()
 
         if mcp_client.is_ready():
-            logging.info("MCP client ready!")
+            logging.info("MCP ready — %d tools across %d server(s)", len(mcp_client.tools), len(mcp_client._sessions))
         else:
-            logging.warning("MCP client failed to initialize: %s", mcp_client._error)
+            logging.warning("No MCP servers initialized successfully. Errors: %s", mcp_client._errors)
     else:
         logging.info("MCP disabled in config")
 
@@ -1121,13 +1150,17 @@ async def on_message(new_msg: discord.Message) -> None:
         # --- Memory sweep ---
         context_gap_minutes = cfg.get("context_gap_minutes", 120)
         channel_injected = session_injected_ids.get(new_msg.channel.id, set())
+        sweep_model_str = cfg.get("sweep_model", provider_slash_model)
+        sweep_client, sweep_model_name, sweep_api_kwargs = create_provider_client(cfg, sweep_model_str)
         new_session = await check_and_run_memory_sweep(
-            new_msg, discord_bot.user, openai_client, model,
+            new_msg, discord_bot.user, sweep_client, sweep_model_name,
             injected_ids=channel_injected,
             embedding_model=emb_model,
             embedding_client=emb_client,
             gap_minutes=context_gap_minutes,
-            extra_headers=extra_headers, extra_query=extra_query, extra_body=extra_body,
+            extra_headers=sweep_api_kwargs.get("extra_headers"),
+            extra_query=sweep_api_kwargs.get("extra_query"),
+            extra_body=sweep_api_kwargs.get("extra_body"),
         )
         if new_session:
             session_injected_ids.pop(new_msg.channel.id, None)
